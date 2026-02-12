@@ -664,10 +664,10 @@ const clawieTalkiePlugin = {
     });
 
     // ──────────────────────────────────────────────────────
-    //  Agent Tool: send_voice
+    //  Agent Tool: clawietalkie_send_voice
     // ──────────────────────────────────────────────────────
     api.registerTool({
-      name: "send_voice",
+      name: "clawietalkie_send_voice",
       label: "Send Voice Message",
       description:
         "Send a voice message to the user's device via ClawieTalkie. Provide the path to an audio file (mp3, wav, ogg, etc.) that you have already generated.",
@@ -719,7 +719,7 @@ const clawieTalkiePlugin = {
             : "audio/mpeg";
 
           api.logger.info(
-            "[clawietalkie] send_voice: " + audioBuffer.length + " bytes from " + audioPath,
+            "[clawietalkie] clawietalkie_send_voice: " + audioBuffer.length + " bytes from " + audioPath,
           );
 
           await savePendingAudio(audioBuffer, contentType, "");
@@ -811,7 +811,7 @@ const clawieTalkiePlugin = {
           };
         } catch (e: any) {
           api.logger.error(
-            "[clawietalkie] send_voice error: " + (e.message || e),
+            "[clawietalkie] clawietalkie_send_voice error: " + (e.message || e),
           );
           return {
             content: [
@@ -827,7 +827,7 @@ const clawieTalkiePlugin = {
     });
 
     api.logger.info(
-      "[clawietalkie] Plugin ready (routes: /clawietalkie/talk, /clawietalkie/pending, /clawietalkie/register; tool: send_voice)",
+      "[clawietalkie] Plugin ready (routes: /clawietalkie/talk, /clawietalkie/pending, /clawietalkie/register; tool: clawietalkie_send_voice)",
     );
   },
 };

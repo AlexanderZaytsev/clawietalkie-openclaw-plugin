@@ -26,7 +26,7 @@ openclaw restart
 ## What it does
 
 - **`/clawietalkie/talk`** — receives audio from the app, passes it to your agent, returns the agent's audio response
-- **`send_voice` tool** — lets your agent proactively send voice messages to your device
+- **`clawietalkie_send_voice` tool** — lets your agent proactively send voice messages to your device
 
 ## Configure the app
 
