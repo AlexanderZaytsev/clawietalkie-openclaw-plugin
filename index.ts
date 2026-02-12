@@ -256,90 +256,6 @@ async function getAIResponse(
   });
 }
 
-/** Build a 44-byte WAV header for raw PCM (fallback path). */
-function pcmToWav(
-  pcm: Buffer,
-  sampleRate: number = 24000,
-  channels: number = 1,
-  bitsPerSample: number = 16,
-): Buffer {
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-  const header = Buffer.alloc(44);
-
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + pcm.length, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(pcm.length, 40);
-
-  return Buffer.concat([header, pcm]);
-}
-
-/**
- * Load textToSpeech from openclaw's extensionAPI.js
- */
-async function loadTextToSpeech(
-  logger: any,
-): Promise<((params: any) => Promise<any>) | null> {
-  const path = await import("node:path");
-  const fs = await import("node:fs");
-  const { pathToFileURL } = await import("node:url");
-
-  const distDir = path.resolve(
-    process.execPath,
-    "..",
-    "..",
-    "lib",
-    "node_modules",
-    "openclaw",
-    "dist",
-  );
-
-  if (!fs.existsSync(distDir)) return null;
-
-  const files = fs.readdirSync(distDir);
-  for (const file of files) {
-    if (!file.startsWith("reply-") || !file.endsWith(".js")) continue;
-    const filePath = path.join(distDir, file);
-    try {
-      const fileUrl = pathToFileURL(filePath).href;
-      const mod = await import(fileUrl);
-      const src = fs.readFileSync(filePath, "utf-8");
-      const match = src.match(/textToSpeech as (\w+)/);
-      if (match) {
-        const alias = match[1];
-        if (typeof mod[alias] === "function") {
-          logger.info(
-            "[clawietalkie] textToSpeech found as '" +
-              alias +
-              "' in " +
-              file,
-          );
-          return mod[alias];
-        }
-      }
-    } catch (e: any) {
-      logger.warn(
-        "[clawietalkie] Failed to load " +
-          file +
-          ": " +
-          (e.message || e),
-      );
-    }
-  }
-
-  return null;
-}
-
 /* ------------------------------------------------------------------ */
 /*  APNs Push Notifications                                           */
 /* ------------------------------------------------------------------ */
@@ -596,80 +512,6 @@ const clawieTalkiePlugin = {
       "[clawietalkie] Registering routes and tools...",
     );
 
-    // Pre-resolve TTS function at registration time
-    let ttsFunc: ((params: any) => Promise<any>) | null = null;
-    loadTextToSpeech(api.logger)
-      .then((fn) => {
-        ttsFunc = fn;
-        if (fn) {
-          api.logger.info(
-            "[clawietalkie] textToSpeech loaded from extensionAPI",
-          );
-        } else {
-          api.logger.warn(
-            "[clawietalkie] textToSpeech not found, will use telephony fallback",
-          );
-        }
-      })
-      .catch(() => {
-        api.logger.warn(
-          "[clawietalkie] textToSpeech load failed",
-        );
-      });
-
-    /** Shared TTS helper used by both the HTTP routes and the tool. */
-    async function textToAudio(
-      text: string,
-    ): Promise<{ audioBuffer: Buffer; contentType: string }> {
-      if (ttsFunc) {
-        const result = await ttsFunc({ text, cfg: api.config });
-        if (!result.success || !result.audioPath) {
-          throw new Error(result.error || "TTS returned no audio path");
-        }
-        const audioBuffer = await readFile(result.audioPath);
-        let contentType = "audio/mpeg";
-        if (result.audioPath.endsWith(".wav"))
-          contentType = "audio/wav";
-        else if (
-          result.audioPath.endsWith(".ogg") ||
-          result.audioPath.endsWith(".opus")
-        )
-          contentType = "audio/ogg";
-        api.logger.info(
-          "[clawietalkie] TTS OK: " +
-            result.provider +
-            ", " +
-            audioBuffer.length +
-            " bytes",
-        );
-        return { audioBuffer, contentType };
-      } else {
-        const result =
-          await api.runtime.tts.textToSpeechTelephony({
-            text,
-            cfg: api.config,
-          });
-        if (!result.success || !result.audioBuffer) {
-          throw new Error(
-            result.error || "Telephony TTS returned no audio",
-          );
-        }
-        const sampleRate = result.sampleRate || 24000;
-        const audioBuffer = pcmToWav(
-          result.audioBuffer,
-          sampleRate,
-        );
-        api.logger.info(
-          "[clawietalkie] TTS OK (telephony): " +
-            result.provider +
-            ", " +
-            audioBuffer.length +
-            " bytes",
-        );
-        return { audioBuffer, contentType: "audio/wav" };
-      }
-    }
-
     // ──────────────────────────────────────────────────────
     //  HTTP Route: POST /clawietalkie/talk
     // ──────────────────────────────────────────────────────
@@ -709,17 +551,32 @@ const clawieTalkiePlugin = {
 
           api.logger.info("[clawietalkie] Saved recording to " + talkAudioPath);
           api.logger.info("[clawietalkie] Requesting AI response...");
-          const responseText = await getAIResponse(
+          const responsePath = await getAIResponse(
             api,
             "walkie_talkie_voice:" + talkAudioPath,
           );
 
           try { await unlink(talkAudioPath); } catch {}
+
+          // Agent returns path to an audio file it generated
+          const trimmedPath = responsePath.trim();
+          if (!existsSync(trimmedPath)) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Agent did not return a valid audio file" }));
+            return;
+          }
+
+          const audioBuffer = await readFile(trimmedPath);
+          const ext = trimmedPath.split(".").pop()?.toLowerCase() || "";
+          const contentType = ext === "wav" ? "audio/wav"
+            : ext === "ogg" || ext === "opus" ? "audio/ogg"
+            : "audio/mpeg";
+
           api.logger.info(
-            "[clawietalkie] Got response (" + responseText.length + " chars)",
+            "[clawietalkie] Got response audio: " + audioBuffer.length + " bytes from " + trimmedPath,
           );
 
-          const { audioBuffer, contentType } = await textToAudio(responseText);
+          try { await unlink(trimmedPath); } catch {}
 
           res.writeHead(200, {
             "Content-Type": contentType,
@@ -730,42 +587,6 @@ const clawieTalkiePlugin = {
           const message =
             err instanceof Error ? err.message : String(err);
           api.logger.error("[clawietalkie] /talk error: " + message);
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: message }));
-        }
-      },
-    });
-
-    // ──────────────────────────────────────────────────────
-    //  HTTP Route: POST /clawietalkie/speak  (legacy)
-    // ──────────────────────────────────────────────────────
-    api.registerHttpRoute({
-      path: "/clawietalkie/speak",
-      async handler(req: IncomingMessage, res: ServerResponse) {
-        if (req.method !== "POST") {
-          res.writeHead(405, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Method not allowed" }));
-          return;
-        }
-
-        try {
-          await readBody(req);
-
-          api.logger.info("[clawietalkie] Requesting AI response...");
-          const text = await getAIResponse(api);
-          api.logger.info("[clawietalkie] Got text (" + text.length + " chars)");
-
-          const { audioBuffer, contentType } = await textToAudio(text);
-
-          res.writeHead(200, {
-            "Content-Type": contentType,
-            "Content-Length": String(audioBuffer.length),
-          });
-          res.end(audioBuffer);
-        } catch (err) {
-          const message =
-            err instanceof Error ? err.message : String(err);
-          api.logger.error("[clawietalkie] Error: " + message);
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: message }));
         }
@@ -849,44 +670,59 @@ const clawieTalkiePlugin = {
       name: "send_voice",
       label: "Send Voice Message",
       description:
-        "Send a proactive voice message to the user's phone via ClawieTalkie push notification. The text will be converted to speech and delivered as a push notification.",
+        "Send a voice message to the user's device via ClawieTalkie. Provide the path to an audio file (mp3, wav, ogg, etc.) that you have already generated.",
       parameters: {
         type: "object",
         properties: {
-          text: {
+          audioPath: {
             type: "string",
             description:
-              "The text to convert to speech and send as a push voice message",
+              "Absolute path to the audio file to send",
           },
         },
-        required: ["text"],
+        required: ["audioPath"],
       } as any,
       async execute(
         toolCallId: string,
         params: any,
       ): Promise<any> {
-        const text = params.text;
-        if (!text) {
+        const audioPath = params.audioPath;
+        if (!audioPath) {
           return {
             content: [
               {
                 type: "text",
-                text: "Error: text parameter is required",
+                text: "Error: audioPath parameter is required",
               },
             ],
-            details: { error: "missing text" },
+            details: { error: "missing audioPath" },
           };
         }
 
         try {
-          api.logger.info(
-            "[clawietalkie] send_voice: converting text (" +
-              text.length +
-              " chars)...",
-          );
-          const { audioBuffer, contentType } = await textToAudio(text);
+          if (!existsSync(audioPath)) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Error: audio file not found at " + audioPath,
+                },
+              ],
+              details: { error: "file not found" },
+            };
+          }
 
-          await savePendingAudio(audioBuffer, contentType, text);
+          const audioBuffer = await readFile(audioPath);
+          const ext = audioPath.split(".").pop()?.toLowerCase() || "";
+          const contentType = ext === "wav" ? "audio/wav"
+            : ext === "ogg" || ext === "opus" ? "audio/ogg"
+            : "audio/mpeg";
+
+          api.logger.info(
+            "[clawietalkie] send_voice: " + audioBuffer.length + " bytes from " + audioPath,
+          );
+
+          await savePendingAudio(audioBuffer, contentType, "");
           api.logger.info(
             "[clawietalkie] Saved pending audio: " +
               audioBuffer.length +
@@ -991,7 +827,7 @@ const clawieTalkiePlugin = {
     });
 
     api.logger.info(
-      "[clawietalkie] Plugin ready (routes: /clawietalkie/talk, /clawietalkie/speak, /clawietalkie/pending, /clawietalkie/register; tool: send_voice)",
+      "[clawietalkie] Plugin ready (routes: /clawietalkie/talk, /clawietalkie/pending, /clawietalkie/register; tool: send_voice)",
     );
   },
 };
